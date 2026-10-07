@@ -1,0 +1,45 @@
+[project]
+name = "mmbench2"
+version = "0.1.0"
+description = "MMBench2 world model, dataset tooling, and hallucination detection/mitigation."
+readme = "README.md"
+requires-python = "==3.10.*"
+# Mirrors the pip section of environment.yaml. The conda-only system packages
+# (glew, glib) are not needed for headless rendering with MUJOCO_GL=egl; swig is
+# provided as a build dependency of box2d-py below.
+dependencies = [
+    "dm-control==1.0.34",
+    "glfw==2.10.0",
+    "gymnasium[atari,accept-rom-license,box2d]==0.29.1",
+    "pygame==2.6.1",
+    "aiohttp==3.13.3",
+    "pillow==12.0.0",
+    "gpustat==1.1.1",
+    "ffmpeg==1.4",
+    "imageio==2.37.0",
+    "imageio-ffmpeg==0.6.0",
+    "metaworld",
+    "mani_skill-nightly==2025.9.19.39",
+    "moviepy==1.0.3",
+    "mujoco==3.3.6",
+    "robodesk==1.0.0",
+    "ogbench==1.1.5",
+    "lpips==0.1.4",
+    "numpy==1.24.4",
+    "tensordict==0.10.0",
+    "torch==2.8.0",
+    "torchvision==0.23.0",
+    "torchrl==0.10.0",
+    "transformers==4.56.2",
+    "wandb==0.25.1",
+    "huggingface_hub==0.36.2",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+metaworld = { git = "https://github.com/nicklashansen/metaworld.git" }
+
+[tool.uv.extra-build-dependencies]
+box2d-py = ["swig"]
