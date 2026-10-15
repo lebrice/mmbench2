@@ -3,7 +3,7 @@ name = "mmbench2"
 version = "0.1.0"
 description = "MMBench2 world model, dataset tooling, and hallucination detection/mitigation."
 readme = "README.md"
-requires-python = "==3.10.*"
+requires-python = ">=3.11"
 # Mirrors the pip section of environment.yaml. The conda-only system packages
 # (glew, glib) are not needed for headless rendering with MUJOCO_GL=egl; swig is
 # provided as a build dependency of box2d-py below.

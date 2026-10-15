@@ -3,29 +3,39 @@
 trained by masked auto-encoding of 224x224 RGB frames. Run from inside
 ``src/`` (flat imports), e.g. ``torchrun --nproc_per_node=8 train_tokenizer.py``.
 """
-import os
-import time
-import random
+
 import argparse
+import os
+import random
+import time
 from pathlib import Path
 
 import numpy as np
 import torch
 import torch.distributed as dist
+import wandb
 from torch.amp import autocast
 from torch.utils.data import DataLoader, DistributedSampler
 
-import wandb
-
-from task_set import TASK_SET, DOMAINS, UNSEEN_TASK_SET, task_to_domain, compute_task_weights
-from sharded_frame_dataset import ShardedFrameDataset
-from train_dynamics import PerDomainAccumulator
 from model import (
-    Encoder, Decoder, Tokenizer,
-    temporal_patchify, temporal_unpatchify,
-    recon_loss_from_mae, lpips_on_mae_recon,
+    Decoder,
     EmaRms,
+    Encoder,
+    Tokenizer,
+    lpips_on_mae_recon,
+    recon_loss_from_mae,
+    temporal_patchify,
+    temporal_unpatchify,
 )
+from sharded_frame_dataset import ShardedFrameDataset
+from task_set import (
+    DOMAINS,
+    TASK_SET,
+    UNSEEN_TASK_SET,
+    compute_task_weights,
+    task_to_domain,
+)
+from train_dynamics import PerDomainAccumulator
 
 try:
     import lpips
@@ -72,9 +82,9 @@ def init_distributed() -> tuple[bool, int, int, int]:
 @torch.no_grad()
 def log_tokenizer_viz_wandb(
     *,
-    x_btchw: torch.Tensor,          # (B,T,C,H,W) float in [0,1]
-    pred_btnd: torch.Tensor,        # (B,T,Np,Dp) float in [0,1]
-    mae_mask_btNp1: torch.Tensor,   # (B,T,Np,1) bool True=masked
+    x_btchw: torch.Tensor,  # (B,T,C,H,W) float in [0,1]
+    pred_btnd: torch.Tensor,  # (B,T,Np,Dp) float in [0,1]
+    mae_mask_btNp1: torch.Tensor,  # (B,T,Np,1) bool True=masked
     patch: int,
     step: int,
     max_items: int = 8,
@@ -89,15 +99,19 @@ def log_tokenizer_viz_wandb(
     target_btnd = temporal_patchify(x_btchw[:, :Tv], patch)  # (B,Tv,Np,Dp)
 
     # panels (patch space)
-    masked_input_btnd = torch.where(mae_mask_btNp1[:, :Tv], torch.zeros_like(target_btnd), target_btnd)
-    recon_masked_btnd = torch.where(mae_mask_btNp1[:, :Tv], pred_btnd[:, :Tv], target_btnd)
-    recon_full_btnd   = pred_btnd[:, :Tv]
+    masked_input_btnd = torch.where(
+        mae_mask_btNp1[:, :Tv], torch.zeros_like(target_btnd), target_btnd
+    )
+    recon_masked_btnd = torch.where(
+        mae_mask_btNp1[:, :Tv], pred_btnd[:, :Tv], target_btnd
+    )
+    recon_full_btnd = pred_btnd[:, :Tv]
 
     # to image space (B,T,C,H,W)
-    target_img = temporal_unpatchify(target_btnd,       H, W, C, patch)
+    target_img = temporal_unpatchify(target_btnd, H, W, C, patch)
     masked_img = temporal_unpatchify(masked_input_btnd, H, W, C, patch)
-    rmask_img  = temporal_unpatchify(recon_masked_btnd, H, W, C, patch)
-    rfull_img  = temporal_unpatchify(recon_full_btnd,   H, W, C, patch)
+    rmask_img = temporal_unpatchify(recon_masked_btnd, H, W, C, patch)
+    rfull_img = temporal_unpatchify(recon_full_btnd, H, W, C, patch)
 
     def tile_time(x: torch.Tensor) -> torch.Tensor:
         # (B,T,C,H,W) -> (B,C,H,T*W)
@@ -106,8 +120,8 @@ def log_tokenizer_viz_wandb(
 
     tgt = tile_time(target_img[:Bv])
     msk = tile_time(masked_img[:Bv])
-    rm  = tile_time(rmask_img[:Bv])
-    rf  = tile_time(rfull_img[:Bv])
+    rm = tile_time(rmask_img[:Bv])
+    rf = tile_time(rfull_img[:Bv])
 
     panel = torch.cat([tgt, msk, rm, rf], dim=2)  # (Bv,C,4H,Tv*W)
     big = torch.cat([panel[i] for i in range(Bv)], dim=1)  # (C,Bv*4H,Tv*W)
@@ -121,7 +135,9 @@ def log_tokenizer_viz_wandb(
                 big_hwc,
                 caption="rows=target/masked/recon_masked/recon_full",
             ),
-            "tokenizer/masked_frac": float(mae_mask_btNp1[:, :Tv].float().mean().item()),
+            "tokenizer/masked_frac": float(
+                mae_mask_btNp1[:, :Tv].float().mean().item()
+            ),
         },
         step=step,
     )
@@ -130,7 +146,7 @@ def log_tokenizer_viz_wandb(
 @torch.no_grad()
 def log_tokenizer_val_viz_wandb(
     *,
-    x_btchw: torch.Tensor,    # (B,T,C,H,W) float in [0,1]
+    x_btchw: torch.Tensor,  # (B,T,C,H,W) float in [0,1]
     pred_btnd: torch.Tensor,  # (B,T,Np,Dp) float in [0,1]
     patch: int,
     step: int,
@@ -143,8 +159,8 @@ def log_tokenizer_val_viz_wandb(
     Bv = min(B, max_items)
 
     target_btnd = temporal_patchify(x_btchw[:, :Tv], patch)
-    target_img  = temporal_unpatchify(target_btnd,         H, W, C, patch)
-    recon_img   = temporal_unpatchify(pred_btnd[:, :Tv],   H, W, C, patch)
+    target_img = temporal_unpatchify(target_btnd, H, W, C, patch)
+    recon_img = temporal_unpatchify(pred_btnd[:, :Tv], H, W, C, patch)
 
     def tile_time(x: torch.Tensor) -> torch.Tensor:
         x = x[:, :Tv]
@@ -153,8 +169,8 @@ def log_tokenizer_val_viz_wandb(
     tgt = tile_time(target_img[:Bv])
     rec = tile_time(recon_img[:Bv])
 
-    panel = torch.cat([tgt, rec], dim=2)                    # (Bv,C,2H,Tv*W)
-    big = torch.cat([panel[i] for i in range(Bv)], dim=1)   # (C,Bv*2H,Tv*W)
+    panel = torch.cat([tgt, rec], dim=2)  # (Bv,C,2H,Tv*W)
+    big = torch.cat([panel[i] for i in range(Bv)], dim=1)  # (C,Bv*2H,Tv*W)
 
     big = (big.clamp(0, 1) * 255.0).to(torch.uint8)
     big_hwc = big.permute(1, 2, 0).cpu().numpy()
@@ -207,8 +223,16 @@ def validate(
     # dataset (0..n_local_tasks-1) so we just bucket per task_idx_batch directly.
     track_per_task = local_task_names is not None
     n_local_tasks = len(local_task_names) if track_per_task else 0
-    task_mse_sum = torch.zeros(n_local_tasks, device=device, dtype=torch.float64) if track_per_task else None
-    task_count = torch.zeros(n_local_tasks, device=device, dtype=torch.float64) if track_per_task else None
+    task_mse_sum = (
+        torch.zeros(n_local_tasks, device=device, dtype=torch.float64)
+        if track_per_task
+        else None
+    )
+    task_count = (
+        torch.zeros(n_local_tasks, device=device, dtype=torch.float64)
+        if track_per_task
+        else None
+    )
 
     try:
         for batch in val_loader:
@@ -233,20 +257,34 @@ def validate(
             sum_mse += float(mse.item())
 
             if task_idx_batch is not None and task_idx_to_domain_idx is not None:
-                mse_per = (pred.float() - patches.float()).pow(2).mean(dim=(1, 2, 3))  # (B,)
+                mse_per = (
+                    (pred.float() - patches.float()).pow(2).mean(dim=(1, 2, 3))
+                )  # (B,)
                 domain_ids = task_idx_to_domain_idx[task_idx_batch]
                 dom_mse_sum.index_add_(0, domain_ids, mse_per.to(torch.float64))
-                dom_count.index_add_(0, domain_ids, torch.ones_like(mse_per, dtype=torch.float64))
+                dom_count.index_add_(
+                    0, domain_ids, torch.ones_like(mse_per, dtype=torch.float64)
+                )
                 if track_per_task:
-                    task_mse_sum.index_add_(0, task_idx_batch, mse_per.to(torch.float64))
-                    task_count.index_add_(0, task_idx_batch, torch.ones_like(mse_per, dtype=torch.float64))
+                    task_mse_sum.index_add_(
+                        0, task_idx_batch, mse_per.to(torch.float64)
+                    )
+                    task_count.index_add_(
+                        0, task_idx_batch, torch.ones_like(mse_per, dtype=torch.float64)
+                    )
 
             if lpips_fn is not None and args.lpips_weight > 0.0:
                 # Full reconstruction LPIPS: pass an all-True mask so `recon_masked == pred`.
                 full_mask = torch.ones_like(patches[..., :1], dtype=torch.bool)
                 lp = lpips_on_mae_recon(
-                    lpips_fn, pred, patches, full_mask,
-                    H=args.H, W=args.W, C=args.C, patch=args.patch,
+                    lpips_fn,
+                    pred,
+                    patches,
+                    full_mask,
+                    H=args.H,
+                    W=args.W,
+                    C=args.C,
+                    patch=args.patch,
                     subsample_frac=args.lpips_frac,
                 )
                 sum_lp += float(lp.item())
@@ -279,7 +317,9 @@ def validate(
         if not np.isfinite(mse_i):
             continue
         out[f"{key_prefix}/domain/{name}/mse"] = mse_i
-        out[f"{key_prefix}/domain/{name}/psnr"] = float(10.0 * np.log10(1.0 / max(mse_i, 1e-10)))
+        out[f"{key_prefix}/domain/{name}/psnr"] = float(
+            10.0 * np.log10(1.0 / max(mse_i, 1e-10))
+        )
     # Per-task PSNR (only when local_task_names is provided — typically UNSEEN).
     if track_per_task:
         for i, name in enumerate(local_task_names):
@@ -290,19 +330,30 @@ def validate(
             if not np.isfinite(mse_i):
                 continue
             out[f"{key_prefix}/per_task/{name}/mse"] = mse_i
-            out[f"{key_prefix}/per_task/{name}/psnr"] = float(10.0 * np.log10(1.0 / max(mse_i, 1e-10)))
+            out[f"{key_prefix}/per_task/{name}/psnr"] = float(
+                10.0 * np.log10(1.0 / max(mse_i, 1e-10))
+            )
     return out, first_x, first_pred
 
 
-def save_ckpt(path: Path, *, step: int, epoch: int, model, opt, args: argparse.Namespace, rms_state: dict = None):
+def save_ckpt(
+    path: Path,
+    *,
+    step: int,
+    epoch: int,
+    model,
+    opt,
+    args: argparse.Namespace,
+    rms_state: dict = None,
+):
     path.parent.mkdir(parents=True, exist_ok=True)
     # Unwrap DDP and torch.compile so the saved state_dict has plain keys
     # (no "module." or "_orig_mod." prefixes), making checkpoints portable
     # across compiled/uncompiled and DDP/non-DDP runs.
     target = model
-    if hasattr(target, "module"):       # DDP wrapper
+    if hasattr(target, "module"):  # DDP wrapper
         target = target.module
-    if hasattr(target, "_orig_mod"):    # torch.compile wrapper
+    if hasattr(target, "_orig_mod"):  # torch.compile wrapper
         target = target._orig_mod
     obj = {
         "step": step,
@@ -325,9 +376,9 @@ def load_ckpt(path: Path, *, model, opt, rms_objects: dict = None) -> tuple[int,
     # checkpoint stores prefix-free keys (see save_ckpt), so loading into the
     # OptimizedModule wrapper would fail because it expects "_orig_mod." prefixes.
     target = model
-    if hasattr(target, "module"):       # DDP wrapper
+    if hasattr(target, "module"):  # DDP wrapper
         target = target.module
-    if hasattr(target, "_orig_mod"):    # torch.compile wrapper
+    if hasattr(target, "_orig_mod"):  # torch.compile wrapper
         target = target._orig_mod
     target.load_state_dict(state, strict=True)
     opt.load_state_dict(ckpt["opt"])
@@ -350,10 +401,15 @@ def train(args):
     # on disk, so runs without UNSEEN data are unaffected.
     full_task_list = list(TASK_SET) + list(UNSEEN_TASK_SET)
     tw_list = compute_task_weights(
-        full_task_list, args.task_weighting,
+        full_task_list,
+        args.task_weighting,
         targeted_alpha=args.targeted_alpha,
     )
-    task_weights = None if args.task_weighting == "valid_starts" else dict(zip(full_task_list, tw_list))
+    task_weights = (
+        None
+        if args.task_weighting == "valid_starts"
+        else dict(zip(full_task_list, tw_list))
+    )
     dataset = ShardedFrameDataset(
         outdirs=args.data_dirs,
         tasks=full_task_list,
@@ -369,10 +425,15 @@ def train(args):
     # Lookup for per-domain metrics: task_idx (into dataset.tasks) -> domain_idx.
     task_idx_to_domain_idx = torch.tensor(
         [DOMAINS.index(task_to_domain(t)) for t in dataset.tasks],
-        dtype=torch.long, device=device,
+        dtype=torch.long,
+        device=device,
     )
 
-    sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True) if ddp else None
+    sampler = (
+        DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True)
+        if ddp
+        else None
+    )
 
     loader = DataLoader(
         dataset,
@@ -436,7 +497,8 @@ def train(args):
         val_unseen_local_tasks = list(val_unseen_dataset.tasks)
         val_unseen_task_idx_to_domain_idx = torch.tensor(
             [DOMAINS.index(task_to_domain(t)) for t in val_unseen_local_tasks],
-            dtype=torch.long, device=device,
+            dtype=torch.long,
+            device=device,
         )
         val_unseen_workers = max(1, args.num_workers // 2)
         val_unseen_loader = DataLoader(
@@ -451,7 +513,9 @@ def train(args):
             worker_init_fn=worker_init_fn,
         )
         if is_rank0():
-            print(f"[rank0] UNSEEN val loader: {len(val_unseen_local_tasks)} tasks from {args.val_unseen_data_dir}")
+            print(
+                f"[rank0] UNSEEN val loader: {len(val_unseen_local_tasks)} tasks from {args.val_unseen_data_dir}"
+            )
 
     # ---- model ----
     assert args.H % args.patch == 0 and args.W % args.patch == 0
@@ -489,7 +553,7 @@ def train(args):
     model = Tokenizer(enc, dec).to(device)
 
     rms_mse = EmaRms().to(device)
-    rms_lp  = EmaRms().to(device)
+    rms_lp = EmaRms().to(device)
 
     if is_rank0():
         print(model)
@@ -501,12 +565,17 @@ def train(args):
 
     if ddp:
         model = torch.nn.parallel.DistributedDataParallel(
-            model, device_ids=[local_rank], output_device=local_rank, broadcast_buffers=False
+            model,
+            device_ids=[local_rank],
+            output_device=local_rank,
+            broadcast_buffers=False,
         )
 
     # ---- optim ----
     trainable_params = [p for p in model.parameters() if p.requires_grad]
-    opt = torch.optim.AdamW(trainable_params, lr=args.lr, weight_decay=args.weight_decay)
+    opt = torch.optim.AdamW(
+        trainable_params, lr=args.lr, weight_decay=args.weight_decay
+    )
     use_amp = torch.cuda.is_available()
 
     # ---- lpips ----
@@ -522,10 +591,18 @@ def train(args):
     if is_rank0():
         _model_for_count = model.module if hasattr(model, "module") else model
         param_count_total = sum(p.numel() for p in _model_for_count.parameters())
-        param_count_trainable = sum(p.numel() for p in _model_for_count.parameters() if p.requires_grad)
-        param_count_enc = sum(p.numel() for p in _model_for_count.encoder.parameters() if p.requires_grad)
-        param_count_dec = sum(p.numel() for p in _model_for_count.decoder.parameters() if p.requires_grad)
-        frames_per_opt_step = args.batch_size * world_size * max(1, args.grad_accum) * args.seq_len
+        param_count_trainable = sum(
+            p.numel() for p in _model_for_count.parameters() if p.requires_grad
+        )
+        param_count_enc = sum(
+            p.numel() for p in _model_for_count.encoder.parameters() if p.requires_grad
+        )
+        param_count_dec = sum(
+            p.numel() for p in _model_for_count.decoder.parameters() if p.requires_grad
+        )
+        frames_per_opt_step = (
+            args.batch_size * world_size * max(1, args.grad_accum) * args.seq_len
+        )
 
         wandb.init(
             project=args.wandb_project,
@@ -535,7 +612,9 @@ def train(args):
             config={
                 **vars(args),
                 "run/world_size": world_size,
-                "run/effective_batch_seqs": args.batch_size * world_size * max(1, args.grad_accum),
+                "run/effective_batch_seqs": args.batch_size
+                * world_size
+                * max(1, args.grad_accum),
                 "run/frames_per_opt_step": frames_per_opt_step,
                 "model/param_count_total": param_count_total,
                 "model/param_count_trainable": param_count_trainable,
@@ -551,10 +630,16 @@ def train(args):
     start_epoch = 0
     ckpt_dir = Path(args.ckpt_dir)
     if args.resume is not None:
-        step, start_epoch = load_ckpt(Path(args.resume), model=model, opt=opt,
-                                      rms_objects={"mse": rms_mse, "lp": rms_lp})
+        step, start_epoch = load_ckpt(
+            Path(args.resume),
+            model=model,
+            opt=opt,
+            rms_objects={"mse": rms_mse, "lp": rms_lp},
+        )
         if is_rank0():
-            print(f"[rank0] Resumed from {args.resume} (step={step}, epoch={start_epoch})")
+            print(
+                f"[rank0] Resumed from {args.resume} (step={step}, epoch={start_epoch})"
+            )
 
     # ---- train ----
     model.train()
@@ -582,13 +667,18 @@ def train(args):
                         _model = model.module if hasattr(model, "module") else model
                         z, _ = _model.encoder(patches)
                         zf = z.float()
-                        wandb.log({
-                            "debug/z_std": float(zf.std().item()),
-                            "debug/z_mean": float(zf.mean().item()),
-                            "debug/z_abs_max": float(zf.abs().max().item()),
-                        }, step=step)
+                        wandb.log(
+                            {
+                                "debug/z_std": float(zf.std().item()),
+                                "debug/z_mean": float(zf.mean().item()),
+                                "debug/z_abs_max": float(zf.abs().max().item()),
+                            },
+                            step=step,
+                        )
 
-                with autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_amp):
+                with autocast(
+                    device_type="cuda", dtype=torch.bfloat16, enabled=use_amp
+                ):
                     pred, mae_mask, keep_prob = model(patches)
 
                 # losses in fp32 (outside autocast).
@@ -599,48 +689,68 @@ def train(args):
                 # Per-sample masked MSE for per-domain PSNR tracking.
                 # Mirrors recon_loss_from_mae but sums per-sample instead of globally.
                 with torch.no_grad():
-                    diff_sq = (pred.float() - patches.float()).pow(2)   # (B,T,Np,Dp)
-                    m = loss_mask.to(dtype=torch.float32)                # (B,T,Np,1)
-                    sq_per = (diff_sq * m).sum(dim=(1, 2, 3))            # (B,)
-                    denom_per = m.sum(dim=(1, 2, 3)) * diff_sq.shape[-1] # (B,)
-                    mse_per_sample = sq_per / denom_per.clamp_min(1.0)   # (B,)
+                    diff_sq = (pred.float() - patches.float()).pow(2)  # (B,T,Np,Dp)
+                    m = loss_mask.to(dtype=torch.float32)  # (B,T,Np,1)
+                    sq_per = (diff_sq * m).sum(dim=(1, 2, 3))  # (B,)
+                    denom_per = m.sum(dim=(1, 2, 3)) * diff_sq.shape[-1]  # (B,)
+                    mse_per_sample = sq_per / denom_per.clamp_min(1.0)  # (B,)
                     domain_ids = task_idx_to_domain_idx[task_idx_batch]
                     domain_acc.update(mse_per_sample, domain_ids)
 
                 if lpips_fn is not None and args.lpips_weight > 0.0:
                     lp = lpips_on_mae_recon(
-                        lpips_fn, pred, patches, loss_mask,
-                        H=args.H, W=args.W, C=args.C, patch=args.patch,
-                        subsample_frac=args.lpips_frac
+                        lpips_fn,
+                        pred,
+                        patches,
+                        loss_mask,
+                        H=args.H,
+                        W=args.W,
+                        C=args.C,
+                        patch=args.patch,
+                        subsample_frac=args.lpips_frac,
                     )
                     rms_lp.update(lp)
-                    loss = rms_mse.normalize(mse) + args.lpips_weight * rms_lp.normalize(lp)
+                    loss = rms_mse.normalize(
+                        mse
+                    ) + args.lpips_weight * rms_lp.normalize(lp)
                 else:
                     lp = torch.zeros((), device=device)
                     loss = rms_mse.normalize(mse)
 
                 if not torch.isfinite(loss):
-                    raise RuntimeError(f"Non-finite loss at step {step}: loss={loss} mse={mse} lp={lp}")
+                    raise RuntimeError(
+                        f"Non-finite loss at step {step}: loss={loss} mse={mse} lp={lp}"
+                    )
 
                 loss_to_backprop = loss / grad_accum
 
                 loss_to_backprop.backward()
 
-                do_step = ((step + 1) % grad_accum == 0)
+                do_step = (step + 1) % grad_accum == 0
                 grad_norm = 0.0
                 grad_norm_enc = 0.0
                 grad_norm_dec = 0.0
                 if do_step:
                     _model = model.module if hasattr(model, "module") else model
-                    clip_enc = args.grad_clip_enc if args.grad_clip_enc > 0 else float('inf')
-                    clip_dec = args.grad_clip_dec if args.grad_clip_dec > 0 else float('inf')
-                    grad_norm_enc = float(torch.nn.utils.clip_grad_norm_(
-                        _model.encoder.parameters(), max_norm=clip_enc,
-                    ).item())
-                    grad_norm_dec = float(torch.nn.utils.clip_grad_norm_(
-                        _model.decoder.parameters(), max_norm=clip_dec,
-                    ).item())
-                    grad_norm = (grad_norm_enc ** 2 + grad_norm_dec ** 2) ** 0.5
+                    clip_enc = (
+                        args.grad_clip_enc if args.grad_clip_enc > 0 else float("inf")
+                    )
+                    clip_dec = (
+                        args.grad_clip_dec if args.grad_clip_dec > 0 else float("inf")
+                    )
+                    grad_norm_enc = float(
+                        torch.nn.utils.clip_grad_norm_(
+                            _model.encoder.parameters(),
+                            max_norm=clip_enc,
+                        ).item()
+                    )
+                    grad_norm_dec = float(
+                        torch.nn.utils.clip_grad_norm_(
+                            _model.decoder.parameters(),
+                            max_norm=clip_dec,
+                        ).item()
+                    )
+                    grad_norm = (grad_norm_enc**2 + grad_norm_dec**2) ** 0.5
 
                     # warmup
                     if args.warmup_steps > 0 and step < args.warmup_steps:
@@ -661,10 +771,26 @@ def train(args):
                 if is_rank0() and (step % args.log_every == 0):
                     psnr = 10.0 * torch.log10(1.0 / mse.clamp_min(1e-10))
                     _model = model.module if hasattr(model, "module") else model
-                    weight_norm_enc = float(sum(p.float().norm().item() ** 2 for p in _model.encoder.parameters()) ** 0.5)
-                    weight_norm_dec = float(sum(p.float().norm().item() ** 2 for p in _model.decoder.parameters()) ** 0.5)
+                    weight_norm_enc = float(
+                        sum(
+                            p.float().norm().item() ** 2
+                            for p in _model.encoder.parameters()
+                        )
+                        ** 0.5
+                    )
+                    weight_norm_dec = float(
+                        sum(
+                            p.float().norm().item() ** 2
+                            for p in _model.decoder.parameters()
+                        )
+                        ** 0.5
+                    )
                     loss_mse_normed = float(rms_mse.normalize(mse).item())
-                    loss_lp_normed = float((args.lpips_weight * rms_lp.normalize(lp)).item()) if lpips_fn is not None else 0.0
+                    loss_lp_normed = (
+                        float((args.lpips_weight * rms_lp.normalize(lp)).item())
+                        if lpips_fn is not None
+                        else 0.0
+                    )
                     log_dict = {
                         "loss/total": float(loss.item()),
                         "loss/mse": float(mse.item()),
@@ -718,7 +844,12 @@ def train(args):
                     )
 
                 # ---- validation ----
-                if val_loader is not None and args.val_every > 0 and step > 0 and (step % args.val_every == 0):
+                if (
+                    val_loader is not None
+                    and args.val_every > 0
+                    and step > 0
+                    and (step % args.val_every == 0)
+                ):
                     val_metrics, val_x, val_pred = validate(
                         model=model,
                         val_loader=val_loader,
@@ -735,7 +866,11 @@ def train(args):
                         print(
                             f"step {step:07d} | VAL mse={val_metrics['val/mse']:.6f} "
                             f"| psnr={val_metrics['val/psnr']:.2f}"
-                            + (f" | lpips={val_metrics['val/lpips']:.4f}" if 'val/lpips' in val_metrics else "")
+                            + (
+                                f" | lpips={val_metrics['val/lpips']:.4f}"
+                                if "val/lpips" in val_metrics
+                                else ""
+                            )
                         )
                         if val_x is not None and args.viz_every > 0:
                             log_tokenizer_val_viz_wandb(
@@ -767,7 +902,11 @@ def train(args):
                             print(
                                 f"step {step:07d} | VAL_UNSEEN mse={val_un_metrics['val_unseen/mse']:.6f} "
                                 f"| psnr={val_un_metrics['val_unseen/psnr']:.2f}"
-                                + (f" | lpips={val_un_metrics['val_unseen/lpips']:.4f}" if 'val_unseen/lpips' in val_un_metrics else "")
+                                + (
+                                    f" | lpips={val_un_metrics['val_unseen/lpips']:.4f}"
+                                    if "val_unseen/lpips" in val_un_metrics
+                                    else ""
+                                )
                             )
                             if val_un_x is not None and args.viz_every > 0:
                                 log_tokenizer_val_viz_wandb(
@@ -781,13 +920,35 @@ def train(args):
                                 )
 
                 # ---- ckpt ----
-                if is_rank0() and args.save_every > 0 and (step % args.save_every == 0) and step > 0 and do_step:
+                if (
+                    is_rank0()
+                    and args.save_every > 0
+                    and (step % args.save_every == 0)
+                    and step > 0
+                    and do_step
+                ):
                     rms_state = {"mse": rms_mse.state_dict(), "lp": rms_lp.state_dict()}
                     ckpt_path = ckpt_dir / f"step_{step:07d}.pt"
-                    save_ckpt(ckpt_path, step=step, epoch=epoch, model=model, opt=opt, args=args, rms_state=rms_state)
+                    save_ckpt(
+                        ckpt_path,
+                        step=step,
+                        epoch=epoch,
+                        model=model,
+                        opt=opt,
+                        args=args,
+                        rms_state=rms_state,
+                    )
                     # also update a "latest" pointer
                     latest = ckpt_dir / "latest.pt"
-                    save_ckpt(latest, step=step, epoch=epoch, model=model, opt=opt, args=args, rms_state=rms_state)
+                    save_ckpt(
+                        latest,
+                        step=step,
+                        epoch=epoch,
+                        model=model,
+                        opt=opt,
+                        args=args,
+                        rms_state=rms_state,
+                    )
                     # log checkpoint as a wandb artifact (versioned, easy to retrieve from the UI)
                     artifact = wandb.Artifact(
                         name=f"{wandb.run.id}-tokenizer",
@@ -812,48 +973,90 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser()
 
     # data
-    p.add_argument("--data_dirs", type=str, nargs="+", default=[
-        "./data/expert-shards",
-        "./data/mixed-large-shards",
-        "./data/mixed-small-shards",
-        "./data/zeros-shards",
-    ])
-    p.add_argument("--val_data_dir", type=str, default="./data/val-shards",
-                   help="optional single directory of preprocessed shards used for validation")
-    p.add_argument("--val_unseen_data_dir", type=str, default=None,
-                   help="optional directory of preprocessed shards for UNSEEN-task validation. "
-                        "Filtered to UNSEEN_TASK_SET. Logs a parallel `val_unseen/...` namespace "
-                        "with per-task PSNR and a side-by-side viz panel under `val_unseen/viz`.")
-    p.add_argument("--val_every", type=int, default=2_000,
-                   help="run validation every N steps (0 disables)")
+    p.add_argument(
+        "--data_dirs",
+        type=str,
+        nargs="+",
+        default=[
+            "./data/expert-shards",
+            "./data/mixed-large-shards",
+            "./data/mixed-small-shards",
+            "./data/zeros-shards",
+        ],
+    )
+    p.add_argument(
+        "--val_data_dir",
+        type=str,
+        default="./data/val-shards",
+        help="optional single directory of preprocessed shards used for validation",
+    )
+    p.add_argument(
+        "--val_unseen_data_dir",
+        type=str,
+        default=None,
+        help="optional directory of preprocessed shards for UNSEEN-task validation. "
+        "Filtered to UNSEEN_TASK_SET. Logs a parallel `val_unseen/...` namespace "
+        "with per-task PSNR and a side-by-side viz panel under `val_unseen/viz`.",
+    )
+    p.add_argument(
+        "--val_every",
+        type=int,
+        default=2_000,
+        help="run validation every N steps (0 disables)",
+    )
 
-    p.add_argument("--val_batches", type=int, default=8,
-                   help="number of batches per validation pass (per rank)")
+    p.add_argument(
+        "--val_batches",
+        type=int,
+        default=8,
+        help="number of batches per validation pass (per rank)",
+    )
     p.add_argument("--seq_len", type=int, default=24)
     p.add_argument("--num_workers", type=int, default=6)
-    p.add_argument("--shard_cache_size", type=int, default=12,
-                   help="number of shards held in each worker's LRU cache")
-    p.add_argument("--prefetch_factor", type=int, default=4,
-                   help="batches prefetched per worker")
-    p.add_argument("--samples_per_shard", type=int, default=16,
-                   help="number of sequences drawn from a loaded shard before "
-                        "picking a new one (1 = pure iid, larger = much less I/O)")
-    p.add_argument("--val_samples_per_shard", type=int, default=1,
-                   help="samples_per_shard for the val loader; defaults to 1 "
-                        "for maximum task diversity in val/viz (val is small "
-                        "and runs infrequently, so I/O cost is bounded)")
-    p.add_argument("--task_weighting", type=str, default="valid_starts",
-                   choices=["valid_starts", "uniform", "targeted"],
-                   help="Per-task sampling weighting. 'valid_starts' (default) "
-                        "makes P(task) ∝ total valid_starts — skews toward "
-                        "long-trajectory domains. 'uniform' "
-                        "gives every task equal draw probability. 'targeted' "
-                        "splits α uniformly over the targeted-collection tasks "
-                        "(SEEN_TASK_SET ∪ UNSEEN_TASK_SET) and (1-α) uniformly "
-                        "over the rest.")
-    p.add_argument("--targeted_alpha", type=float, default=0.5,
-                   help="(--task_weighting=targeted only) total per-batch "
-                        "probability allocated to the targeted-collection tasks.")
+    p.add_argument(
+        "--shard_cache_size",
+        type=int,
+        default=12,
+        help="number of shards held in each worker's LRU cache",
+    )
+    p.add_argument(
+        "--prefetch_factor", type=int, default=4, help="batches prefetched per worker"
+    )
+    p.add_argument(
+        "--samples_per_shard",
+        type=int,
+        default=16,
+        help="number of sequences drawn from a loaded shard before "
+        "picking a new one (1 = pure iid, larger = much less I/O)",
+    )
+    p.add_argument(
+        "--val_samples_per_shard",
+        type=int,
+        default=1,
+        help="samples_per_shard for the val loader; defaults to 1 "
+        "for maximum task diversity in val/viz (val is small "
+        "and runs infrequently, so I/O cost is bounded)",
+    )
+    p.add_argument(
+        "--task_weighting",
+        type=str,
+        default="valid_starts",
+        choices=["valid_starts", "uniform", "targeted"],
+        help="Per-task sampling weighting. 'valid_starts' (default) "
+        "makes P(task) ∝ total valid_starts — skews toward "
+        "long-trajectory domains. 'uniform' "
+        "gives every task equal draw probability. 'targeted' "
+        "splits α uniformly over the targeted-collection tasks "
+        "(SEEN_TASK_SET ∪ UNSEEN_TASK_SET) and (1-α) uniformly "
+        "over the rest.",
+    )
+    p.add_argument(
+        "--targeted_alpha",
+        type=float,
+        default=0.5,
+        help="(--task_weighting=targeted only) total per-batch "
+        "probability allocated to the targeted-collection tasks.",
+    )
     p.add_argument("--batch_size", type=int, default=12)
 
     # image / patching
@@ -886,7 +1089,9 @@ if __name__ == "__main__":
     # lpips
     p.add_argument("--lpips_weight", type=float, default=0.2)
     p.add_argument("--lpips_frac", type=float, default=0.5)
-    p.add_argument("--lpips_net", type=str, default="alex", choices=["alex", "vgg", "squeeze"])
+    p.add_argument(
+        "--lpips_net", type=str, default="alex", choices=["alex", "vgg", "squeeze"]
+    )
 
     # logging / viz
     p.add_argument("--log_every", type=int, default=200)

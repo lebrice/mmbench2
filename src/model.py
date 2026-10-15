@@ -2,7 +2,7 @@
 import math
 from dataclasses import dataclass
 from enum import IntEnum
-from typing import Optional, Tuple, Dict, List
+from typing import Dict, List, Literal, Optional, Tuple
 
 import torch
 import torch._dynamo
@@ -48,15 +48,22 @@ class Encoder(nn.Module):
         self.patch_proj = nn.Linear(patch_dim, d_model)
         self.bottleneck_proj = nn.Linear(d_model, d_bottleneck)
 
-        self.layout = TokenLayout(n_latents=n_latents, segments=((Modality.IMAGE, n_patches),))
+        self.layout = TokenLayout(
+            n_latents=n_latents, segments=((Modality.IMAGE, n_patches),)
+        )
         modality_ids = self.layout.modality_ids()  # CPU buffer, moves with .to(device)
 
         self.transformer = BlockCausalTransformer(
-            d_model=d_model, n_heads=n_heads, depth=depth,
-            n_latents=n_latents, modality_ids=modality_ids,
+            d_model=d_model,
+            n_heads=n_heads,
+            depth=depth,
+            n_latents=n_latents,
+            modality_ids=modality_ids,
             space_mode="encoder",
-            dropout=dropout, mlp_ratio=mlp_ratio,
-            time_every=time_every, latents_only_time=latents_only_time,
+            dropout=dropout,
+            mlp_ratio=mlp_ratio,
+            time_every=time_every,
+            latents_only_time=latents_only_time,
         )
         self.mae = MAEReplacer(d_model=d_model, p_min=mae_p_min, p_max=mae_p_max)
 
@@ -67,14 +74,16 @@ class Encoder(nn.Module):
         B, T, Np, Dp = patch_tokens_btnd.shape
         assert Np == self.n_patches
 
-        proj = self.patch_proj(patch_tokens_btnd)            # (B,T,Np,D)
-        proj_masked, mae_mask, keep_prob = self.mae(proj)    # (B,T,Np,D), (B,T,Np,1), (B,T,1)
+        proj = self.patch_proj(patch_tokens_btnd)  # (B,T,Np,D)
+        proj_masked, mae_mask, keep_prob = self.mae(
+            proj
+        )  # (B,T,Np,D), (B,T,Np,1), (B,T,1)
 
         lat = self.latents.view(1, 1, self.n_latents, -1).expand(B, T, -1, -1)
-        tokens = torch.cat([lat, proj_masked], dim=2)        # (B,T,S,D)
+        tokens = torch.cat([lat, proj_masked], dim=2)  # (B,T,S,D)
 
         enc = self.transformer(tokens)
-        z = torch.tanh(self.bottleneck_proj(enc[:, :, :self.n_latents, :]))
+        z = torch.tanh(self.bottleneck_proj(enc[:, :, : self.n_latents, :]))
         return z, (mae_mask, keep_prob)
 
 
@@ -104,28 +113,35 @@ class Decoder(nn.Module):
 
         self.patch_head = nn.Linear(d_model, d_patch)
 
-        self.layout = TokenLayout(n_latents=n_latents, segments=((Modality.IMAGE, n_patches),))
+        self.layout = TokenLayout(
+            n_latents=n_latents, segments=((Modality.IMAGE, n_patches),)
+        )
         modality_ids = self.layout.modality_ids()
 
         self.transformer = BlockCausalTransformer(
-            d_model=d_model, n_heads=n_heads, depth=depth,
-            n_latents=n_latents, modality_ids=modality_ids,
+            d_model=d_model,
+            n_heads=n_heads,
+            depth=depth,
+            n_latents=n_latents,
+            modality_ids=modality_ids,
             space_mode="decoder",
-            dropout=dropout, mlp_ratio=mlp_ratio,
-            time_every=time_every, latents_only_time=latents_only_time,
+            dropout=dropout,
+            mlp_ratio=mlp_ratio,
+            time_every=time_every,
+            latents_only_time=latents_only_time,
         )
 
     def forward(self, z_btLd: torch.Tensor) -> torch.Tensor:
         B, T, L, _ = z_btLd.shape
         assert L == self.n_latents
 
-        lat = self.up_proj(z_btLd)                                              # (B,T,L,D)
+        lat = self.up_proj(z_btLd)  # (B,T,L,D)
         qry = self.patch_queries.view(1, 1, self.n_patches, -1).expand(B, T, -1, -1)
-        tokens = torch.cat([lat, qry], dim=2)                                  # (B,T,S,D)
+        tokens = torch.cat([lat, qry], dim=2)  # (B,T,S,D)
 
         x = self.transformer(tokens)
         x_p = x[:, :, L:, :]
-        return torch.sigmoid(self.patch_head(x_p))                             # (B,T,Np,Dp)
+        return torch.sigmoid(self.patch_head(x_p))  # (B,T,Np,Dp)
 
 
 class Dynamics(nn.Module):
@@ -147,7 +163,9 @@ class Dynamics(nn.Module):
         lang_dim: int = 0,
     ):
         super().__init__()
-        assert d_spatial % d_bottleneck == 0, "expected packing: d_spatial = d_bottleneck * packing_factor"
+        assert d_spatial % d_bottleneck == 0, (
+            "expected packing: d_spatial = d_bottleneck * packing_factor"
+        )
         self.d_model = int(d_model)
         self.d_spatial = int(d_spatial)
         self.n_spatial = int(n_spatial)
@@ -174,7 +192,9 @@ class Dynamics(nn.Module):
 
         # shortcut conditioning: σ and d embeddings are half-sized and concatenated
         # into a single token per the paper ("their channels are concatenated").
-        assert self.d_model % 2 == 0, "d_model must be even for shortcut token channel concatenation"
+        assert self.d_model % 2 == 0, (
+            "d_model must be even for shortcut token channel concatenation"
+        )
         self.num_step_bins = int(math.log2(self.k_max)) + 1
         self.step_embed = nn.Embedding(self.num_step_bins, self.d_model // 2)
         self.signal_embed = nn.Embedding(self.k_max + 1, self.d_model // 2)
@@ -213,10 +233,10 @@ class Dynamics(nn.Module):
 
     def forward(
         self,
-        actions: Optional[torch.Tensor],          # (B,T,16) or None
-        step_idxs: Optional[torch.Tensor],        # (B,T)
-        signal_idxs: Optional[torch.Tensor],      # (B,T)
-        packed_enc_tokens: torch.Tensor,          # (B,T,n_spatial,d_spatial)
+        actions: Optional[torch.Tensor],  # (B,T,16) or None
+        step_idxs: Optional[torch.Tensor],  # (B,T)
+        signal_idxs: Optional[torch.Tensor],  # (B,T)
+        packed_enc_tokens: torch.Tensor,  # (B,T,n_spatial,d_spatial)
         *,
         act_mask: Optional[torch.Tensor] = None,  # (B,T,16) or (16,) or None
         agent_tokens: Optional[torch.Tensor] = None,
@@ -234,22 +254,35 @@ class Dynamics(nn.Module):
             act_mask=act_mask,
         )  # (B,T,1,d_model)
 
-        reg = self.register_tokens.view(1, 1, self.n_register, self.d_model).expand(B, T, -1, -1)
+        reg = self.register_tokens.view(1, 1, self.n_register, self.d_model).expand(
+            B, T, -1, -1
+        )
 
-        assert step_idxs is not None and signal_idxs is not None, \
+        assert step_idxs is not None and signal_idxs is not None, (
             "step_idxs/signal_idxs are required"
-        sig_emb  = self.signal_embed(signal_idxs.to(torch.long))           # (B,T,d_model//2)
-        step_emb = self.step_embed(step_idxs.to(torch.long))               # (B,T,d_model//2)
-        shortcut_tok = torch.cat([sig_emb, step_emb], dim=-1)[:, :, None, :]  # (B,T,1,d_model)
+        )
+        sig_emb = self.signal_embed(signal_idxs.to(torch.long))  # (B,T,d_model//2)
+        step_emb = self.step_embed(step_idxs.to(torch.long))  # (B,T,d_model//2)
+        shortcut_tok = torch.cat([sig_emb, step_emb], dim=-1)[
+            :, :, None, :
+        ]  # (B,T,1,d_model)
 
         if self.n_agent > 0:
             if agent_tokens is None:
                 if self.task_proj is not None and lang_emb is not None:
                     # Project lang_emb to agent token initial values, broadcast over T.
-                    agent_tokens = self.task_proj(lang_emb.to(dtype=spatial_tokens.dtype))  # (B, n_agent*d_model)
-                    agent_tokens = agent_tokens.view(B, 1, self.n_agent, self.d_model).expand(B, T, -1, -1)
+                    agent_tokens = self.task_proj(
+                        lang_emb.to(dtype=spatial_tokens.dtype)
+                    )  # (B, n_agent*d_model)
+                    agent_tokens = agent_tokens.view(
+                        B, 1, self.n_agent, self.d_model
+                    ).expand(B, T, -1, -1)
                 else:
-                    agent_tokens = torch.zeros((B, T, self.n_agent, self.d_model), device=spatial_tokens.device, dtype=spatial_tokens.dtype)
+                    agent_tokens = torch.zeros(
+                        (B, T, self.n_agent, self.d_model),
+                        device=spatial_tokens.device,
+                        dtype=spatial_tokens.dtype,
+                    )
             toks = [action_tokens, shortcut_tok, spatial_tokens, reg, agent_tokens]
         else:
             toks = [action_tokens, shortcut_tok, spatial_tokens, reg]
@@ -268,7 +301,7 @@ class Dynamics(nn.Module):
 
         h_t = None
         if self.n_agent > 0:
-            h_t = x[:, :, self.agent_slice, :]   # (B,T,n_agent,d_model)
+            h_t = x[:, :, self.agent_slice, :]  # (B,T,n_agent,d_model)
 
         if return_kv_cache:
             return x1_hat, h_t, new_cache
@@ -280,6 +313,7 @@ class ActionEncoder(nn.Module):
     Continuous actions in [-1,1], shape (B,T,A) -> token (B,T,1,D).
     If actions is None (unlabeled pretrain), emits a learned base token.
     """
+
     def __init__(self, d_model: int, action_dim: int = 16, hidden_mult: float = 2.0):
         super().__init__()
         self.d_model = int(d_model)
@@ -297,10 +331,10 @@ class ActionEncoder(nn.Module):
 
     def forward(
         self,
-        actions: Optional[torch.Tensor],                 # (B,T,A) or None
+        actions: Optional[torch.Tensor],  # (B,T,A) or None
         *,
-        batch_time_shape: Optional[Tuple[int,int]] = None,
-        act_mask: Optional[torch.Tensor] = None,         # (B,T,A) or (A,)
+        batch_time_shape: Optional[Tuple[int, int]] = None,
+        act_mask: Optional[torch.Tensor] = None,  # (B,T,A) or (A,)
     ) -> torch.Tensor:
         if actions is None:
             assert batch_time_shape is not None
@@ -325,6 +359,7 @@ class RewardHeadMTP(nn.Module):
     Input:  h_t: (B,T,n_agent,D) or (B,T,D)
     Output: logits: (B,T,L,K), centers_log: (K,)
     """
+
     def __init__(
         self,
         *,
@@ -343,7 +378,9 @@ class RewardHeadMTP(nn.Module):
         self.d_model = int(d_model)
         self.pool_agent = pool_agent
         if pool_agent not in ("attn", "mean", "first"):
-            raise ValueError(f"pool_agent must be one of attn|mean|first, got {pool_agent}")
+            raise ValueError(
+                f"pool_agent must be one of attn|mean|first, got {pool_agent}"
+            )
 
         # Attention pool: a single learnable query reads over the n_agent tokens,
         # letting the head put task-dependent weights on each agent slot.
@@ -375,12 +412,12 @@ class RewardHeadMTP(nn.Module):
                 h = h_t.mean(dim=2)
             else:  # attn
                 B, T, N, D = h_t.shape
-                kv = self.pool_kv(h_t)                                   # (B,T,N,2D)
-                k, v = kv.chunk(2, dim=-1)                               # (B,T,N,D) each
-                q = self.pool_query.to(dtype=k.dtype)                    # (D,)
-                scores = (k * q).sum(dim=-1) / math.sqrt(D)              # (B,T,N)
+                kv = self.pool_kv(h_t)  # (B,T,N,2D)
+                k, v = kv.chunk(2, dim=-1)  # (B,T,N,D) each
+                q = self.pool_query.to(dtype=k.dtype)  # (D,)
+                scores = (k * q).sum(dim=-1) / math.sqrt(D)  # (B,T,N)
                 attn = scores.softmax(dim=-1)
-                h = (attn.unsqueeze(-1) * v).sum(dim=2)                  # (B,T,D)
+                h = (attn.unsqueeze(-1) * v).sum(dim=2)  # (B,T,D)
         else:
             h = h_t  # (B,T,D)
 
@@ -409,6 +446,7 @@ class PolicyHeadMTP(nn.Module):
     Input:  h_t: (B,T,n_agent,D) or (B,T,D)
     Output: action_means: (B,T,L,A) in [-1, 1]
     """
+
     def __init__(
         self,
         *,
@@ -425,7 +463,9 @@ class PolicyHeadMTP(nn.Module):
         self.d_model = int(d_model)
         self.pool_agent = pool_agent
         if pool_agent not in ("attn", "mean", "first"):
-            raise ValueError(f"pool_agent must be one of attn|mean|first, got {pool_agent}")
+            raise ValueError(
+                f"pool_agent must be one of attn|mean|first, got {pool_agent}"
+            )
 
         if pool_agent == "attn":
             self.pool_query = nn.Parameter(torch.randn(self.d_model) * 0.02)
@@ -450,12 +490,12 @@ class PolicyHeadMTP(nn.Module):
                 h = h_t.mean(dim=2)
             else:  # attn
                 B, T, N, D = h_t.shape
-                kv = self.pool_kv(h_t)                                   # (B,T,N,2D)
-                k, v = kv.chunk(2, dim=-1)                               # (B,T,N,D) each
-                q = self.pool_query.to(dtype=k.dtype)                    # (D,)
-                scores = (k * q).sum(dim=-1) / math.sqrt(D)              # (B,T,N)
+                kv = self.pool_kv(h_t)  # (B,T,N,2D)
+                k, v = kv.chunk(2, dim=-1)  # (B,T,N,D) each
+                q = self.pool_query.to(dtype=k.dtype)  # (D,)
+                scores = (k * q).sum(dim=-1) / math.sqrt(D)  # (B,T,N)
                 attn = scores.softmax(dim=-1)
-                h = (attn.unsqueeze(-1) * v).sum(dim=2)                  # (B,T,D)
+                h = (attn.unsqueeze(-1) * v).sum(dim=2)  # (B,T,D)
         else:
             h = h_t  # (B,T,D)
 
@@ -488,11 +528,15 @@ class TokenLayout:
     def modality_ids(self) -> torch.Tensor:
         parts = []
         if self.n_latents > 0:
-            parts.append(torch.full((self.n_latents,), int(Modality.LATENT), dtype=torch.int32))
+            parts.append(
+                torch.full((self.n_latents,), int(Modality.LATENT), dtype=torch.int32)
+            )
         for m, n in self.segments:
             if n > 0:
                 parts.append(torch.full((n,), int(m), dtype=torch.int32))
-        return torch.cat(parts, dim=0) if parts else torch.zeros((0,), dtype=torch.int32)
+        return (
+            torch.cat(parts, dim=0) if parts else torch.zeros((0,), dtype=torch.int32)
+        )
 
     def slices(self) -> Dict[Modality, slice]:
         idx = 0
@@ -515,7 +559,9 @@ class MAEReplacer(nn.Module):
         self.mask_token = nn.Parameter(torch.empty(d_model))
         nn.init.normal_(self.mask_token, std=0.02)
 
-    def forward(self, patches_btnd: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(
+        self, patches_btnd: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         patches: (B,T,Np,D)
         returns:
@@ -533,8 +579,8 @@ class MAEReplacer(nn.Module):
             return patches_btnd, mae_mask, keep_prob
 
         p_bt = torch.empty((B, T), device=device).uniform_(self.p_min, self.p_max)
-        keep_prob = (1.0 - p_bt).unsqueeze(-1)                          # (B,T,1)
-        keep = (torch.rand((B, T, Np), device=device) < keep_prob)      # (B,T,Np)
+        keep_prob = (1.0 - p_bt).unsqueeze(-1)  # (B,T,1)
+        keep = torch.rand((B, T, Np), device=device) < keep_prob  # (B,T,Np)
         keep_ = keep.unsqueeze(-1)
         mask_tok = self.mask_token.to(dtype=patches_btnd.dtype)
         replaced = torch.where(keep_, patches_btnd, mask_tok.view(1, 1, 1, D))
@@ -550,7 +596,7 @@ class BlockCausalTransformer(nn.Module):
         depth: int,
         n_latents: int,
         modality_ids: torch.Tensor,
-        space_mode: str,
+        space_mode: Literal["encoder", "decoder"],
         dropout: float,
         mlp_ratio: float,
         time_every: int,
@@ -559,10 +605,15 @@ class BlockCausalTransformer(nn.Module):
         super().__init__()
         self.layers = nn.ModuleList([
             BlockCausalLayer(
-                d_model=d_model, n_heads=n_heads, n_latents=n_latents,
-                modality_ids=modality_ids, space_mode=space_mode,
-                dropout=dropout, mlp_ratio=mlp_ratio,
-                layer_index=i, time_every=time_every,
+                d_model=d_model,
+                n_heads=n_heads,
+                n_latents=n_latents,
+                modality_ids=modality_ids,
+                space_mode=space_mode,
+                dropout=dropout,
+                mlp_ratio=mlp_ratio,
+                layer_index=i,
+                time_every=time_every,
                 latents_only_time=latents_only_time,
             )
             for i in range(depth)
@@ -574,7 +625,9 @@ class BlockCausalTransformer(nn.Module):
         kv_cache: Optional[List[Optional[Tuple[torch.Tensor, torch.Tensor]]]] = None,
         return_kv_cache: bool = False,
     ) -> torch.Tensor:
-        new_caches: Optional[List[Optional[Tuple[torch.Tensor, torch.Tensor]]]] = [] if return_kv_cache else None
+        new_caches: Optional[List[Optional[Tuple[torch.Tensor, torch.Tensor]]]] = (
+            [] if return_kv_cache else None
+        )
         for i, layer in enumerate(self.layers):
             layer_cache = kv_cache[i] if kv_cache is not None else None
             if return_kv_cache:
@@ -604,15 +657,19 @@ class BlockCausalLayer(nn.Module):
         latents_only_time: bool,
     ):
         super().__init__()
-        self.do_time = ((layer_index + 1) % time_every == 0)
+        self.do_time = (layer_index + 1) % time_every == 0
 
         self.norm1 = RMSNorm(d_model)
-        self.space = SpaceSelfAttentionModality(d_model, n_heads, modality_ids, n_latents, space_mode, dropout)
+        self.space = SpaceSelfAttentionModality(
+            d_model, n_heads, modality_ids, n_latents, space_mode, dropout
+        )
         self.drop1 = nn.Dropout(dropout)
 
         if self.do_time:
             self.norm2 = RMSNorm(d_model)
-            self.time = TimeSelfAttention(d_model, n_heads, dropout, latents_only_time, n_latents)
+            self.time = TimeSelfAttention(
+                d_model, n_heads, dropout, latents_only_time, n_latents
+            )
             self.drop2 = nn.Dropout(dropout)
 
         self.norm3 = RMSNorm(d_model)
@@ -641,14 +698,25 @@ class BlockCausalLayer(nn.Module):
 
 
 class SpaceSelfAttentionModality(nn.Module):
-    def __init__(self, d_model: int, n_heads: int, modality_ids: torch.Tensor, n_latents: int, mode: str, dropout: float):
+    def __init__(
+        self,
+        d_model: int,
+        n_heads: int,
+        modality_ids: torch.Tensor,
+        n_latents: int,
+        mode: str,
+        dropout: float,
+    ):
         super().__init__()
         self.n_latents = int(n_latents)
         self.mode = mode
-        self.register_buffer("modality_ids", modality_ids.to(torch.int32), persistent=False)
+        self.register_buffer(
+            "modality_ids", modality_ids.to(torch.int32), persistent=False
+        )
+        self.modality_ids: torch.Tensor
 
         S = int(self.modality_ids.numel())
-        allow = self._build_allow(S)                               # (S,S) True=allowed
+        allow = self._build_allow(S)  # (S,S) True=allowed
         attn_mask = torch.zeros(1, 1, S, S, dtype=torch.float32)
         attn_mask.masked_fill_(~allow.unsqueeze(0).unsqueeze(0), float("-inf"))
         self.register_buffer("attn_mask", attn_mask, persistent=False)
@@ -665,7 +733,7 @@ class SpaceSelfAttentionModality(nn.Module):
 
         q_mod = self.modality_ids[q_idx]
         k_mod = self.modality_ids[k_idx]
-        same_mod = (q_mod == k_mod)
+        same_mod = q_mod == k_mod
 
         if self.mode == "encoder":
             allow_lat_q = torch.ones((S, S), dtype=torch.bool, device=device)
@@ -683,8 +751,8 @@ class SpaceSelfAttentionModality(nn.Module):
             # - Non-agent q never sees Agent k
             # Action and obs mix bidirectionally; agent tokens stay isolated from the rest.
 
-            is_q_agent = (q_mod == int(Modality.AGENT))
-            is_k_agent = (k_mod == int(Modality.AGENT))
+            is_q_agent = q_mod == int(Modality.AGENT)
+            is_k_agent = k_mod == int(Modality.AGENT)
 
             allow_for_agent_q = torch.ones((S, S), dtype=torch.bool, device=device)
             allow_nonagent = ~is_k_agent  # non-agent queries see all non-agent keys
@@ -702,7 +770,14 @@ class SpaceSelfAttentionModality(nn.Module):
 
 
 class TimeSelfAttention(nn.Module):
-    def __init__(self, d_model: int, n_heads: int, dropout: float, latents_only: bool, n_latents: int):
+    def __init__(
+        self,
+        d_model: int,
+        n_heads: int,
+        dropout: float,
+        latents_only: bool,
+        n_latents: int,
+    ):
         super().__init__()
         self.latents_only = bool(latents_only)
         self.n_latents = int(n_latents)
@@ -755,7 +830,9 @@ class MultiheadSelfAttention(nn.Module):
         # QKNorm (always on): per-head temperature, positive by construction.
         # Init g ~= sqrt(head_dim) so initial logit scale matches typical 1/sqrt(d) behavior.
         init = math.sqrt(self.head_dim)
-        self.log_qk_scale = nn.Parameter(torch.full((n_heads,), math.log(init), dtype=torch.float32))
+        self.log_qk_scale = nn.Parameter(
+            torch.full((n_heads,), math.log(init), dtype=torch.float32)
+        )
 
         # numeric stability for normalize
         self.qk_eps = 1e-6
@@ -780,7 +857,9 @@ class MultiheadSelfAttention(nn.Module):
         # RoPE — when using KV cache, offset by the cached sequence length
         if kv_cache is not None:
             rope_offset = kv_cache[0].shape[2]
-        cos, sin = self.rope.get_cos_sin(L, device=x_nld.device, dtype=q.dtype, offset=rope_offset)
+        cos, sin = self.rope.get_cos_sin(
+            L, device=x_nld.device, dtype=q.dtype, offset=rope_offset
+        )
         q = apply_rope(q, cos, sin)
         k = apply_rope(k, cos, sin)
 
@@ -807,7 +886,9 @@ class MultiheadSelfAttention(nn.Module):
 
         drop = self.dropout_p if self.training else 0.0
         y = F.scaled_dot_product_attention(
-            q, k, v,
+            q,
+            k,
+            v,
             attn_mask=attn_mask,
             dropout_p=drop,
             is_causal=is_causal,
@@ -835,27 +916,28 @@ class RotaryEmbedding(nn.Module):
     def get_cos_sin(self, seq_len: int, *, device, dtype, offset: int = 0):
         needed = seq_len + offset
         need_new = (
-            self._cos_cached is None or
-            self._sin_cached is None or
-            self._seq_len_cached < needed or
-            self._cache_device != device
+            self._cos_cached is None
+            or self._sin_cached is None
+            or self._seq_len_cached < needed
+            or self._cache_device != device
         )
 
         if need_new:
             # Build in fp32 and cache in fp32
             t = torch.arange(needed, device=device, dtype=torch.float32)  # (needed,)
-            inv = self.inv_freq.to(device=device)                         # (dim/2,)
-            freqs = torch.einsum("i,j->ij", t, inv)                       # (needed, dim/2)
-            emb = torch.cat([freqs, freqs], dim=-1)                       # (needed, dim)
+            inv = self.inv_freq.to(device=device)  # (dim/2,)
+            freqs = torch.einsum("i,j->ij", t, inv)  # (needed, dim/2)
+            emb = torch.cat([freqs, freqs], dim=-1)  # (needed, dim)
 
             self._cos_cached = emb.cos()  # fp32
             self._sin_cached = emb.sin()  # fp32
             self._seq_len_cached = needed
             self._cache_device = device
 
+        assert self._cos_cached is not None and self._sin_cached is not None
         # Slice then cast to requested dtype (bf16/fp16/etc)
-        cos = self._cos_cached[offset:offset + seq_len].to(dtype=dtype)
-        sin = self._sin_cached[offset:offset + seq_len].to(dtype=dtype)
+        cos = self._cos_cached[offset : offset + seq_len].to(dtype=dtype)
+        sin = self._sin_cached[offset : offset + seq_len].to(dtype=dtype)
         return cos, sin
 
 
@@ -910,13 +992,15 @@ def temporal_patchify(videos_btchw: torch.Tensor, patch: int) -> torch.Tensor:
     B, T, C, H, W = videos_btchw.shape
     assert H % patch == 0 and W % patch == 0
     x = videos_btchw.reshape(B * T, C, H, W)
-    cols = F.unfold(x, kernel_size=patch, stride=patch)          # (BT, C*pp, Np)
-    cols = cols.transpose(1, 2).contiguous()                     # (BT, Np, Dp)
+    cols = F.unfold(x, kernel_size=patch, stride=patch)  # (BT, C*pp, Np)
+    cols = cols.transpose(1, 2).contiguous()  # (BT, Np, Dp)
     Np, Dp = cols.shape[1], cols.shape[2]
     return cols.reshape(B, T, Np, Dp)
 
 
-def temporal_unpatchify(patches_btnd: torch.Tensor, H: int, W: int, C: int, patch: int) -> torch.Tensor:
+def temporal_unpatchify(
+    patches_btnd: torch.Tensor, H: int, W: int, C: int, patch: int
+) -> torch.Tensor:
     """
     patches: (B,T,Np,Dp) -> (B,T,C,H,W)
     """
@@ -924,17 +1008,21 @@ def temporal_unpatchify(patches_btnd: torch.Tensor, H: int, W: int, C: int, patc
     B, T, Np, Dp = patches_btnd.shape
     assert Dp == C * patch * patch
     x = patches_btnd.reshape(B * T, Np, Dp).transpose(1, 2).contiguous()  # (BT, Dp, Np)
-    out = F.fold(x, output_size=(H, W), kernel_size=patch, stride=patch)  # (BT, C, H, W)
+    out = F.fold(
+        x, output_size=(H, W), kernel_size=patch, stride=patch
+    )  # (BT, C, H, W)
     return out.reshape(B, T, C, H, W)
 
 
-def pack_bottleneck_to_spatial(z_btLd: torch.Tensor, *, n_spatial: int, k: int) -> torch.Tensor:
+def pack_bottleneck_to_spatial(
+    z_btLd: torch.Tensor, *, n_spatial: int, k: int
+) -> torch.Tensor:
     """
     z: (B,T,L,D_b) where L == n_spatial * k
     -> (B,T,n_spatial,D_b*k)
     """
     B, T, L, D = z_btLd.shape
-    assert L == n_spatial * k, f"L={L} must equal n_spatial*k={n_spatial*k}"
+    assert L == n_spatial * k, f"L={L} must equal n_spatial*k={n_spatial * k}"
     return z_btLd.view(B, T, n_spatial, k * D)
 
 
@@ -957,9 +1045,9 @@ def symexp(y: torch.Tensor) -> torch.Tensor:
 
 
 def dist_cross_entropy_from_symlog(
-    logits: torch.Tensor,          # (..., K)
-    target_symlog: torch.Tensor,   # (...,)
-    centers_log: torch.Tensor,     # (K,)
+    logits: torch.Tensor,  # (..., K)
+    target_symlog: torch.Tensor,  # (...,)
+    centers_log: torch.Tensor,  # (K,)
     mask: Optional[torch.Tensor] = None,  # (...) bool/float
 ) -> torch.Tensor:
     with torch.no_grad():
@@ -974,7 +1062,9 @@ def dist_cross_entropy_from_symlog(
 
 
 @torch.no_grad()
-def twohot_from_symlog(y: torch.Tensor, centers_log: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+def twohot_from_symlog(
+    y: torch.Tensor, centers_log: torch.Tensor, eps: float = 1e-8
+) -> torch.Tensor:
     """
     y: (...,) in symlog-space
     centers_log: (K,) monotonically increasing in symlog-space
@@ -1004,9 +1094,11 @@ class EmaRms(nn.Module):
     of their root-mean-square (RMS)." This makes loss coefficients interpretable
     as relative weights regardless of each term's absolute scale.
     """
+
     def __init__(self, decay: float = 0.99):
         super().__init__()
         self.decay = float(decay)
+        self.sq_ema: torch.Tensor
         self.register_buffer("sq_ema", torch.tensor(1.0))
 
     @torch.no_grad()
@@ -1021,6 +1113,7 @@ class EmaRms(nn.Module):
     def sync(self, world_size: int) -> None:
         """Average sq_ema across all DDP ranks so normalization is consistent."""
         import torch.distributed as dist
+
         if world_size > 1 and dist.is_initialized():
             dist.all_reduce(self.sq_ema, op=dist.ReduceOp.AVG)
 
@@ -1029,16 +1122,16 @@ class EmaRms(nn.Module):
         return float(self.sq_ema.sqrt().item())
 
 
-def recon_loss_from_mae(pred_btnd: torch.Tensor,
-                        target_btnd: torch.Tensor,
-                        mae_mask_btNp1: torch.Tensor) -> torch.Tensor:
+def recon_loss_from_mae(
+    pred_btnd: torch.Tensor, target_btnd: torch.Tensor, mae_mask_btNp1: torch.Tensor
+) -> torch.Tensor:
     # mask: (B,T,Np,1) bool, True where masked
     mask = mae_mask_btNp1.to(dtype=torch.float32)  # (B,T,Np,1)
 
     # compute in fp32 to avoid fp16 overflow on reduction
-    diff = (pred_btnd.float() - target_btnd.float())          # (B,T,Np,Dp)
-    sq = diff.mul(diff) * mask                                # broadcast mask over Dp
-    denom = mask.sum().clamp_min(1.0) * diff.shape[-1]        # (#masked patches) * Dp
+    diff = pred_btnd.float() - target_btnd.float()  # (B,T,Np,Dp)
+    sq = diff.mul(diff) * mask  # broadcast mask over Dp
+    denom = mask.sum().clamp_min(1.0) * diff.shape[-1]  # (#masked patches) * Dp
     return sq.sum() / denom
 
 
@@ -1048,25 +1141,28 @@ def lpips_on_mae_recon(
     target_btnd: torch.Tensor,
     mae_mask_btNp1: torch.Tensor,
     *,
-    H: int, W: int, C: int, patch: int,
+    H: int,
+    W: int,
+    C: int,
+    patch: int,
     subsample_frac: float = 1.0,
 ) -> torch.Tensor:
     recon_masked_btnd = torch.where(mae_mask_btNp1, pred_btnd, target_btnd)
     recon = temporal_unpatchify(recon_masked_btnd.float(), H, W, C, patch)
-    tgt   = temporal_unpatchify(target_btnd.float(),        H, W, C, patch)
+    tgt = temporal_unpatchify(target_btnd.float(), H, W, C, patch)
 
     if subsample_frac < 1.0:
         B, T = recon.shape[:2]
         step = max(1, int(1.0 / subsample_frac))
         recon = recon[:, ::step]
-        tgt   = tgt[:, ::step]
+        tgt = tgt[:, ::step]
 
     recon = (recon.clamp(0, 1) * 2.0 - 1.0).float()
-    tgt   = (tgt.clamp(0, 1)   * 2.0 - 1.0).float()
+    tgt = (tgt.clamp(0, 1) * 2.0 - 1.0).float()
 
     B, T = recon.shape[:2]
     recon = recon.reshape(B * T, C, H, W)
-    tgt   = tgt.reshape(B * T, C, H, W)
+    tgt = tgt.reshape(B * T, C, H, W)
 
     with torch.autocast(device_type="cuda", enabled=False):
         lp = lpips_fn(recon, tgt)

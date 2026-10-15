@@ -1,8 +1,8 @@
 # wm_dataset.py
-import os
+import bisect
 import glob
 import json
-import bisect
+import os
 import random as _random
 from collections import OrderedDict
 from typing import Dict, Mapping, Optional, Sequence, Union
@@ -18,6 +18,7 @@ class WMDataset(Dataset):
     data_dir and frames_dir may each be a str or list[str]. Lists are treated as
     paired roots; a length-1 root is broadcast to match a longer one.
     """
+
     def __init__(
         self,
         data_dir: Union[str, Sequence[str]],
@@ -55,8 +56,10 @@ class WMDataset(Dataset):
             elif len(frames_dirs) == 1:
                 frames_dirs = frames_dirs * len(data_dirs)
             else:
-                raise ValueError(f"data_dir and frames_dir must have same length (or one must be length-1). "
-                                 f"Got {len(data_dirs)} and {len(frames_dirs)}")
+                raise ValueError(
+                    f"data_dir and frames_dir must have same length (or one must be length-1). "
+                    f"Got {len(data_dirs)} and {len(frames_dirs)}"
+                )
 
         self.data_dirs = data_dirs
         self.frames_dirs = frames_dirs
@@ -80,10 +83,14 @@ class WMDataset(Dataset):
                     self.task_meta = json.load(f)
             except Exception as e:
                 if self.verbose:
-                    print(f"[WMDataset] Warning: failed to load tasks_json={tasks_json}: {e}")
+                    print(
+                        f"[WMDataset] Warning: failed to load tasks_json={tasks_json}: {e}"
+                    )
                 self.task_meta = None
         elif tasks_json and self.verbose:
-            print(f"[WMDataset] Warning: tasks_json not found at {tasks_json} (continuing with zeros lang_emb + default action masks).")
+            print(
+                f"[WMDataset] Warning: tasks_json not found at {tasks_json} (continuing with zeros lang_emb + default action masks)."
+            )
 
         self._zero_lang = torch.zeros(self.lang_dim, dtype=torch.float32)
 
@@ -103,14 +110,20 @@ class WMDataset(Dataset):
                     found_tasks.append(t)
 
         if self.tasks_filter is not None:
-            requested = [t for t in tasks if t in self.tasks_filter] if tasks is not None else []
+            requested = (
+                [t for t in tasks if t in self.tasks_filter]
+                if tasks is not None
+                else []
+            )
             if len(requested) == 0:
                 requested = [t for t in found_tasks if t in self.tasks_filter]
             tasks = requested
 
             if self.verbose:
                 missing = [t for t in self.tasks_filter if t not in set(found_tasks)]
-                print(f"[WMDataset] Task filter: keeping {len(tasks)}/{len(found_tasks)} tasks")
+                print(
+                    f"[WMDataset] Task filter: keeping {len(tasks)}/{len(found_tasks)} tasks"
+                )
                 if missing:
                     msg = f"[WMDataset] WARNING: {len(missing)} requested tasks not found in data_dir(s) (e.g. {missing[:5]})"
                     if self.strict_tasks:
@@ -128,8 +141,10 @@ class WMDataset(Dataset):
             if world_size > 1 and len(tasks) >= world_size:
                 tasks = [tasks[i] for i in range(rank, len(tasks), world_size)]
                 if self.verbose:
-                    print(f"[WMDataset] DDP partition: rank {rank}/{world_size} "
-                          f"→ {len(tasks)} tasks (strided)")
+                    print(
+                        f"[WMDataset] DDP partition: rank {rank}/{world_size} "
+                        f"→ {len(tasks)} tasks (strided)"
+                    )
 
         self.iid_sampling = bool(iid_sampling)
         self.samples_per_shard = int(samples_per_shard)
@@ -139,10 +154,10 @@ class WMDataset(Dataset):
 
         # Stored per-task
         self.tasks = []
-        self.demo_paths = []     # stores list of per-task demo paths (joined)
-        self.shard_lists = []    # per task -> list[segments], each segment is list[shard_paths]
-        self.shard_cum = []      # per task -> list[segments], each segment is list[int] cumulative frame counts per shard
-        self.seg_cum_frames = [] # per task -> cumulative frame counts across segments (for indexing)
+        self.demo_paths = []  # stores list of per-task demo paths (joined)
+        self.shard_lists = []  # per task -> list[segments], each segment is list[shard_paths]
+        self.shard_cum = []  # per task -> list[segments], each segment is list[int] cumulative frame counts per shard
+        self.seg_cum_frames = []  # per task -> cumulative frame counts across segments (for indexing)
 
         self.ep = []
         self.act = []
@@ -169,7 +184,7 @@ class WMDataset(Dataset):
 
             ep_offset = 0  # ensures episode ids are unique across segments
 
-            for (dd, fd) in self.sources:
+            for dd, fd in self.sources:
                 dp = os.path.join(dd, f"{task}.pt")
                 shard_glob = os.path.join(fd, task, "*shard*.pt")
                 shards = sorted(glob.glob(shard_glob))
@@ -180,7 +195,9 @@ class WMDataset(Dataset):
                     td = torch.load(dp, map_location="cpu", weights_only=False)
                 except Exception as e:
                     if self.verbose:
-                        print(f"[WMDataset] Skipping task={task} source=({dd},{fd}): torch.load demo failed: {e}")
+                        print(
+                            f"[WMDataset] Skipping task={task} source=({dd},{fd}): torch.load demo failed: {e}"
+                        )
                     continue
 
                 try:
@@ -189,7 +206,9 @@ class WMDataset(Dataset):
                     rew = td["reward"].cpu()
                 except Exception as e:
                     if self.verbose:
-                        print(f"[WMDataset] Skipping task={task} source=({dd},{fd}): missing keys in demo: {e}")
+                        print(
+                            f"[WMDataset] Skipping task={task} source=({dd},{fd}): missing keys in demo: {e}"
+                        )
                     continue
 
                 if rew.ndim == 2 and rew.shape[-1] == 1:
@@ -203,7 +222,9 @@ class WMDataset(Dataset):
                 N = int(rew.shape[0])
                 if act.shape[0] != N or ep.shape[0] != N:
                     if self.verbose:
-                        print(f"[WMDataset] Skipping task={task} source=({dd},{fd}): length mismatch ep/act/rew.")
+                        print(
+                            f"[WMDataset] Skipping task={task} source=({dd},{fd}): length mismatch ep/act/rew."
+                        )
                     continue
 
                 # Determine per-shard frame counts from index file or last shard
@@ -226,7 +247,9 @@ class WMDataset(Dataset):
                             shard_sizes.append(int(td_s["frames"].shape[0]))
                         except Exception as e:
                             if self.verbose:
-                                print(f"[WMDataset] Skipping task={task} source=({dd},{fd}): failed to read shard {s}: {e}")
+                                print(
+                                    f"[WMDataset] Skipping task={task} source=({dd},{fd}): failed to read shard {s}: {e}"
+                                )
                             fallback_ok = False
                             break
                     if not fallback_ok:
@@ -236,7 +259,9 @@ class WMDataset(Dataset):
                 N_eff = min(N, N_frames_avail)
                 if N_eff < (self.T + 1):
                     if self.verbose:
-                        print(f"[WMDataset] Skipping task={task} source=({dd},{fd}): not enough frames (N_eff={N_eff}) for T={self.T}.")
+                        print(
+                            f"[WMDataset] Skipping task={task} source=({dd},{fd}): not enough frames (N_eff={N_eff}) for T={self.T}."
+                        )
                     continue
 
                 ep = ep[:N_eff]
@@ -270,7 +295,9 @@ class WMDataset(Dataset):
 
             if len(seg_eps) == 0:
                 if self.verbose:
-                    print(f"[WMDataset] Skipping task={task}: missing demo+shards across all sources.")
+                    print(
+                        f"[WMDataset] Skipping task={task}: missing demo+shards across all sources."
+                    )
                 continue
 
             # Concatenate segments for this task
@@ -284,7 +311,7 @@ class WMDataset(Dataset):
             start_count = N_eff - self.T  # i in [0, start_count-1]
 
             # episode consistency: ensure the whole window is within same episode
-            ep_ok = (ep[:start_count] == ep[self.T:self.T + start_count])
+            ep_ok = ep[:start_count] == ep[self.T : self.T + start_count]
 
             # filter invalid transitions (nan action or nan reward)
             act_nan = torch.isnan(act).any(dim=-1)
@@ -292,7 +319,7 @@ class WMDataset(Dataset):
             step_ok = ~(act_nan | rew_nan)  # length N_eff
 
             # transitions live at indices 1..N_eff-1
-            step_ok2 = step_ok[1:]          # length N_eff-1
+            step_ok2 = step_ok[1:]  # length N_eff-1
 
             # for each start i, need step_ok at indices (i+1 .. i+T) all true
             cs = torch.cumsum(step_ok2.to(torch.int32), dim=0)
@@ -302,13 +329,15 @@ class WMDataset(Dataset):
             m = prev >= 0
             prev_cs[m] = cs[prev[m]]
             window_sum = cs[end] - prev_cs
-            window_ok = (window_sum == self.T)
+            window_ok = window_sum == self.T
 
             valid = ep_ok & window_ok
             valid_idx = valid.nonzero(as_tuple=False).flatten()
             if valid_idx.numel() == 0:
                 if self.verbose:
-                    print(f"[WMDataset] Skipping task={task}: no valid windows after filtering.")
+                    print(
+                        f"[WMDataset] Skipping task={task}: no valid windows after filtering."
+                    )
                 continue
 
             # --- per-task action_dim + mask from tasks.json ---
@@ -328,11 +357,18 @@ class WMDataset(Dataset):
 
             # --- per-task language embedding from tasks.json ---
             lang = self._zero_lang
-            if self.lang_dim > 0 and self.task_meta is not None and task in self.task_meta and "text_embedding" in self.task_meta[task]:
+            if (
+                self.lang_dim > 0
+                and self.task_meta is not None
+                and task in self.task_meta
+                and "text_embedding" in self.task_meta[task]
+            ):
                 te = self.task_meta[task]["text_embedding"]
                 l = torch.tensor(te, dtype=torch.float32)
                 if l.numel() != self.lang_dim:
-                    raise RuntimeError(f"text_embedding dim mismatch for task {task}: {tuple(l.shape)} vs {self.lang_dim}")
+                    raise RuntimeError(
+                        f"text_embedding dim mismatch for task {task}: {tuple(l.shape)} vs {self.lang_dim}"
+                    )
                 lang = l
 
             # Store
@@ -366,8 +402,10 @@ class WMDataset(Dataset):
             self._cum_counts.append(total)
 
             if self.verbose:
-                print(f"[WMDataset] task={task} segments={len(seg_shards)} N_eff={N_eff} "
-                      f"valid={valid_idx.numel()} act_dim={act_dim} lang={'yes' if lang is not self._zero_lang else 'no'}")
+                print(
+                    f"[WMDataset] task={task} segments={len(seg_shards)} N_eff={N_eff} "
+                    f"valid={valid_idx.numel()} act_dim={act_dim} lang={'yes' if lang is not self._zero_lang else 'no'}"
+                )
 
         self.num_tasks = len(self.tasks)
         assert self.num_tasks > 0, "No tasks found with both demo .pt and frame shards."
@@ -392,9 +430,11 @@ class WMDataset(Dataset):
                     missing.append(t)
                     tw_list.append(0.0)
             if missing and self.verbose:
-                print(f"[WMDataset] Warning: {len(missing)} loaded tasks have no "
-                      f"task_weights entry and will be excluded from sampling "
-                      f"(e.g. {missing[:5]})")
+                print(
+                    f"[WMDataset] Warning: {len(missing)} loaded tasks have no "
+                    f"task_weights entry and will be excluded from sampling "
+                    f"(e.g. {missing[:5]})"
+                )
             self.task_weights: Optional[list[float]] = tw_list
         else:
             self.task_weights = None
@@ -409,7 +449,9 @@ class WMDataset(Dataset):
             # Collect raw shard entries grouped by task first so we can
             # renormalize shard weights to honor task_weights without
             # changing the intra-task distribution.
-            per_task_entries: list[list[tuple[dict, float]]] = [[] for _ in range(self.num_tasks)]
+            per_task_entries: list[list[tuple[dict, float]]] = [
+                [] for _ in range(self.num_tasks)
+            ]
             for ti in range(self.num_tasks):
                 seg_cum = self.seg_cum_frames[ti]
                 vs = self.valid_starts[ti]
@@ -424,7 +466,10 @@ class WMDataset(Dataset):
                         shard_vs = vs[mask]
                         if shard_vs.numel() > 0:
                             entry = {"task_idx": ti, "valid_starts": shard_vs}
-                            per_task_entries[ti].append((entry, float(shard_vs.numel())))
+                            per_task_entries[ti].append((
+                                entry,
+                                float(shard_vs.numel()),
+                            ))
 
             if self.task_weights is None:
                 # Legacy path: shard weight = its valid_starts count.
@@ -453,15 +498,21 @@ class WMDataset(Dataset):
                         self._shard_weights.append(w * scale)
 
             if self.verbose:
-                msg = f"[WMDataset] iid_sampling: {len(self._shard_entries)} shard entries " \
-                      f"(samples_per_shard={self.samples_per_shard})"
+                msg = (
+                    f"[WMDataset] iid_sampling: {len(self._shard_entries)} shard entries "
+                    f"(samples_per_shard={self.samples_per_shard})"
+                )
                 if self.task_weights is not None:
                     nz = sum(1 for w in self.task_weights if w > 0)
-                    msg += f" | task_weights active ({nz}/{self.num_tasks} tasks with w>0)"
+                    msg += (
+                        f" | task_weights active ({nz}/{self.num_tasks} tasks with w>0)"
+                    )
                 print(msg)
 
         if self.verbose:
-            print(f"[WMDataset] Total valid sequences: {self._cum_counts[-1]} across {self.num_tasks} tasks.")
+            print(
+                f"[WMDataset] Total valid sequences: {self._cum_counts[-1]} across {self.num_tasks} tasks."
+            )
 
     def __len__(self):
         return self._cum_counts[-1]
@@ -495,7 +546,9 @@ class WMDataset(Dataset):
         self._cache[key] = tensor
         self._cache_nbytes += nbytes
 
-    def _load_shard_frames(self, task_idx: int, seg_idx: int, shard_idx: int) -> torch.Tensor:
+    def _load_shard_frames(
+        self, task_idx: int, seg_idx: int, shard_idx: int
+    ) -> torch.Tensor:
         key = (task_idx, seg_idx, shard_idx)
         cached = self._cache_get(key)
         if cached is not None:
@@ -519,7 +572,9 @@ class WMDataset(Dataset):
                 frames = (frames_f.clamp(0, 1) * 255.0).to(torch.uint8)
 
         if frames.shape[-2] != self.H or frames.shape[-1] != self.W:
-            raise RuntimeError(f"Shard frame size {tuple(frames.shape[-2:])} != {(self.H, self.W)} in {path}")
+            raise RuntimeError(
+                f"Shard frame size {tuple(frames.shape[-2:])} != {(self.H, self.W)} in {path}"
+            )
 
         self._cache_put(key, frames)
         return frames
@@ -558,7 +613,7 @@ class WMDataset(Dataset):
                     f"local_idx={local_idx} shard_idx={shard_idx} off={off} shard_len={frames.shape[0]}"
                 )
 
-            out.append(frames[off:off + take])
+            out.append(frames[off : off + take])
             idx += take
             remaining -= take
 
@@ -569,8 +624,10 @@ class WMDataset(Dataset):
             # Locality-friendly sampling: draw samples_per_shard consecutive
             # samples from the same on-disk shard before switching, keeping
             # the file hot in the LRU cache and reducing I/O.
-            if (self._cur_shard_entry is None
-                    or self._cur_shard_draws >= self.samples_per_shard):
+            if (
+                self._cur_shard_entry is None
+                or self._cur_shard_draws >= self.samples_per_shard
+            ):
                 self._cur_shard_entry = _random.choices(
                     range(len(self._shard_entries)),
                     weights=self._shard_weights,
@@ -588,15 +645,19 @@ class WMDataset(Dataset):
         obs = self._get_frames(task_idx, start, self.T + 1)  # (T+1,3,H,W) uint8
 
         # Transition from obs[t] -> obs[t+1] uses action/reward stored at index (t+1)
-        act = self.act[task_idx][start + 1 : start + 1 + self.T]   # (T,16) float32 (padded)
-        rew = self.rew[task_idx][start + 1 : start + 1 + self.T]   # (T,) float32
+        act = self.act[task_idx][
+            start + 1 : start + 1 + self.T
+        ]  # (T,16) float32 (padded)
+        rew = self.rew[task_idx][start + 1 : start + 1 + self.T]  # (T,) float32
 
         Ad = int(self._act_dims[task_idx])
         act_padded = torch.zeros(self.T, self.A, dtype=torch.float32)
         if Ad > 0:
             act_padded[:, :Ad] = torch.nan_to_num(act[:, :Ad], nan=0.0)
 
-        act_mask = self._act_mask_1d[task_idx][None, :].expand(self.T, self.A).contiguous()
+        act_mask = (
+            self._act_mask_1d[task_idx][None, :].expand(self.T, self.A).contiguous()
+        )
 
         return {
             "obs": obs,
